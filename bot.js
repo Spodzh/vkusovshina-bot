@@ -140,23 +140,14 @@ bot.on('message', async (msg) => {
     }
 
     // ----- 6. СТИЛИ (НОВАЯ КНОПКА) -----
-    if (text === '🎨 Стили') {
-        const styleButtons = {
-            inline_keyboard: [
-                [{ text: '🌿 Лёгкий и воздушный', callback_data: 'style_light' }],
-                [{ text: '🔥 Яркий и дерзкий', callback_data: 'style_modern' }],
-                [{ text: '🇫🇷 Классический французский', callback_data: 'style_french' }],
-                [{ text: '🇯🇵 Минималистичный японский', callback_data: 'style_japanese' }],
-                [{ text: '🌱 Эко-стиль', callback_data: 'style_eco' }],
-                [{ text: '❌ Отмена', callback_data: 'style_cancel' }]
-            ]
-        };
-        bot.sendMessage(chatId, '🎨 <b>Выберите стиль для сайта:</b>', {
-            parse_mode: 'HTML',
-            reply_markup: styleButtons
-        });
-        return;
-    }
+   const styleNames = {
+    light: '🌿 Лёгкий и воздушный',
+    modern: '🔥 Яркий и дерзкий',
+    french: '🇫🇷 Классический французский',
+    japanese: '🇯🇵 Минималистичный японский',
+    eco: '🌱 Эко-стиль',
+    classic: '⚫ Классический (премиум)'
+};
 
     // ----- 7. ПОМОЩЬ -----
     if (text === '❓ Помощь') {
