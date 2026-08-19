@@ -6,7 +6,31 @@ const SERVER_URL = 'https://vkusovshina-server.onrender.com';
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-// ===== ПОСТОЯННАЯ КЛАВИАТУРА СНИЗУ =====
+console.log('🤖 Бот запущен');
+
+// Кэш меню (чтобы не запрашивать каждый раз)
+let cachedMenu = null;
+let cacheTime = 0;
+const CACHE_TTL = 60000; // 1 минута
+
+async function getMenu() {
+    const now = Date.now();
+    if (cachedMenu && (now - cacheTime) < CACHE_TTL) {
+        return cachedMenu;
+    }
+    try {
+        const start = Date.now();
+        const response = await axios.get(`${SERVER_URL}/menu`);
+        console.log(`⏱️ Запрос меню занял ${Date.now() - start} мс`);
+        cachedMenu = response.data;
+        cacheTime = now;
+        return cachedMenu;
+    } catch (e) {
+        console.error('Ошибка получения меню:', e.message);
+        return null;
+    }
+}
+
 function getMainKeyboard() {
     return {
         keyboard: [
@@ -27,29 +51,32 @@ function sendMainMenu(chatId, text = '🏠 <b>Главное меню</b>\nВы�
     });
 }
 
-// ===== /start =====
+// /start и /help – как раньше
 bot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
-    sendMainMenu(chatId, '👋 <b>Добро пожаловать в бот управления рестораном!</b>\nВыберите действие:');
+    sendMainMenu(msg.chat.id, '👋 <b>Добро пожаловать в бот управления рестораном!</b>\nВыберите действие:');
 });
 
-// ===== /help =====
 bot.onText(/\/help/, (msg) => {
     sendMainMenu(msg.chat.id, '❓ <b>Справка</b>\nВсе действия доступны через кнопки ниже.');
 });
 
-// ===== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ =====
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
-
     if (!text || text.startsWith('/')) return;
+
+    console.log(`📩 Получено сообщение: "${text}" от ${chatId}`);
+
+    const startTime = Date.now();
 
     // ----- 1. МЕНЮ -----
     if (text === '📋 Меню') {
         try {
-            const response = await axios.get(`${SERVER_URL}/menu`);
-            const menu = response.data;
+            const menu = await getMenu();
+            if (!menu) {
+                bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
+                return;
+            }
             if (menu.length === 0) {
                 bot.sendMessage(chatId, '📋 <b>Меню пусто</b>\nДобавьте блюда через "➕ Добавить блюдо".', {
                     parse_mode: 'HTML',
@@ -66,8 +93,10 @@ bot.on('message', async (msg) => {
                 });
             }
         } catch (e) {
+            console.error('Ошибка в меню:', e);
             bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
         }
+        console.log(`⏱️ Команда "Меню" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
@@ -80,14 +109,18 @@ bot.on('message', async (msg) => {
                 reply_markup: getMainKeyboard()
             }
         );
+        console.log(`⏱️ Команда "Добавить" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
     // ----- 3. УДАЛИТЬ БЛЮДО -----
     if (text === '🗑️ Удалить блюдо') {
         try {
-            const response = await axios.get(`${SERVER_URL}/menu`);
-            const menu = response.data;
+            const menu = await getMenu();
+            if (!menu) {
+                bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
+                return;
+            }
             if (menu.length === 0) {
                 bot.sendMessage(chatId, '📋 Меню пусто, удалять нечего.', { reply_markup: getMainKeyboard() });
             } else {
@@ -101,12 +134,14 @@ bot.on('message', async (msg) => {
                 });
             }
         } catch (e) {
+            console.error('Ошибка удаления:', e);
             bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
         }
+        console.log(`⏱️ Команда "Удалить" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
-    // ----- 4. ПЕРЕКЛЮЧИТЬ СТАТУС -----
+    // ----- 4. ОТКРЫТЬ/ЗАКРЫТЬ -----
     if (text === '🔄 Открыть/Закрыть') {
         try {
             const statusRes = await axios.get(`${SERVER_URL}/status`);
@@ -119,8 +154,10 @@ bot.on('message', async (msg) => {
                 reply_markup: getMainKeyboard()
             });
         } catch (e) {
+            console.error('Ошибка статуса:', e);
             bot.sendMessage(chatId, '❌ Ошибка изменения статуса', { reply_markup: getMainKeyboard() });
         }
+        console.log(`⏱️ Команда "Открыть/Закрыть" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
@@ -135,12 +172,14 @@ bot.on('message', async (msg) => {
                 reply_markup: getMainKeyboard()
             });
         } catch (e) {
+            console.error('Ошибка статуса:', e);
             bot.sendMessage(chatId, '❌ Ошибка получения статуса', { reply_markup: getMainKeyboard() });
         }
+        console.log(`⏱️ Команда "Статус" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
-    // ----- 6. СТИЛИ (с кнопкой "Классический") -----
+    // ----- 6. СТИЛИ -----
     if (text === '🎨 Стили') {
         const styleButtons = {
             inline_keyboard: [
@@ -157,6 +196,7 @@ bot.on('message', async (msg) => {
             parse_mode: 'HTML',
             reply_markup: styleButtons
         });
+        console.log(`⏱️ Команда "Стили" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
@@ -184,6 +224,7 @@ bot.on('message', async (msg) => {
             parse_mode: 'HTML',
             reply_markup: getMainKeyboard()
         });
+        console.log(`⏱️ Команда "Помощь" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
@@ -203,9 +244,11 @@ bot.on('message', async (msg) => {
                 }
                 menu.push({ name, emoji, price, desc });
                 await axios.post(`${SERVER_URL}/admin/menu`, { menu });
+                // Очищаем кэш меню
+                cachedMenu = null;
                 bot.sendMessage(chatId, `✅ Блюдо "${name}" добавлено!`, { reply_markup: getMainKeyboard() });
             } catch (e) {
-                console.error(e);
+                console.error('Ошибка добавления:', e);
                 bot.sendMessage(chatId, '❌ Ошибка добавления блюда. Попробуйте позже.', { reply_markup: getMainKeyboard() });
             }
         } else {
@@ -214,6 +257,7 @@ bot.on('message', async (msg) => {
                 { parse_mode: 'HTML', reply_markup: getMainKeyboard() }
             );
         }
+        console.log(`⏱️ Обработка добавления выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
@@ -221,6 +265,7 @@ bot.on('message', async (msg) => {
     bot.sendMessage(chatId, 'ℹ️ Используйте кнопки снизу для управления.', {
         reply_markup: getMainKeyboard()
     });
+    console.log(`⏱️ Неизвестное сообщение обработано за ${Date.now() - startTime} мс`);
 });
 
 // ===== ОБРАБОТЧИК ИНЛАЙН-КНОПОК =====
@@ -228,8 +273,9 @@ bot.on('callback_query', async (callbackQuery) => {
     const data = callbackQuery.data;
     const chatId = callbackQuery.message.chat.id;
     const messageId = callbackQuery.message.message_id;
+    const start = Date.now();
 
-    // ----- УДАЛЕНИЕ БЛЮДА -----
+    // УДАЛЕНИЕ
     if (data.startsWith('remove_')) {
         const index = parseInt(data.replace('remove_', ''));
         if (isNaN(index) || index < 0) {
@@ -246,23 +292,22 @@ bot.on('callback_query', async (callbackQuery) => {
             }
             const removed = menu.splice(index, 1)[0];
             await axios.post(`${SERVER_URL}/admin/menu`, { menu });
+            // Очищаем кэш
+            cachedMenu = null;
             await bot.editMessageText(`✅ Блюдо "<b>${removed.name}</b>" удалено!`, {
                 chat_id: chatId,
                 message_id: messageId,
                 parse_mode: 'HTML'
             });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Блюдо удалено!' });
-            // ВОЗВРАЩАЕМ ГЛАВНОЕ МЕНЮ
             sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
         } catch (e) {
-            console.error(e);
-            await bot.editMessageText('❌ Ошибка удаления блюда', {
-                chat_id: chatId,
-                message_id: messageId
-            });
+            console.error('Ошибка удаления:', e);
+            await bot.editMessageText('❌ Ошибка удаления блюда', { chat_id: chatId, message_id: messageId });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
             sendMainMenu(chatId, '🏠 Главное меню');
         }
+        console.log(`⏱️ Удаление выполнено за ${Date.now() - start} мс`);
         return;
     }
 
@@ -270,17 +315,15 @@ bot.on('callback_query', async (callbackQuery) => {
         await bot.editMessageText('❌ Удаление отменено', { chat_id: chatId, message_id: messageId });
         await bot.answerCallbackQuery(callbackQuery.id);
         sendMainMenu(chatId, '🏠 Главное меню');
+        console.log(`⏱️ Отмена удаления за ${Date.now() - start} мс`);
         return;
     }
 
-    // ----- ВЫБОР СТИЛЯ -----
+    // СТИЛИ
     if (data.startsWith('style_')) {
         const style = data.replace('style_', '');
         if (style === 'cancel') {
-            await bot.editMessageText('❌ Выбор стиля отменён', {
-                chat_id: chatId,
-                message_id: messageId
-            });
+            await bot.editMessageText('❌ Выбор стиля отменён', { chat_id: chatId, message_id: messageId });
             await bot.answerCallbackQuery(callbackQuery.id);
             sendMainMenu(chatId, '🏠 Главное меню');
             return;
@@ -305,42 +348,37 @@ bot.on('callback_query', async (callbackQuery) => {
                 }
             );
             await bot.answerCallbackQuery(callbackQuery.id, { text: `Стиль ${styleNames[style] || style} установлен!` });
-            // ВОЗВРАЩАЕМ ГЛАВНОЕ МЕНЮ
             sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
         } catch (e) {
-            console.error(e);
-            await bot.editMessageText('❌ Ошибка установки стиля', {
-                chat_id: chatId,
-                message_id: messageId
-            });
+            console.error('Ошибка установки стиля:', e);
+            await bot.editMessageText('❌ Ошибка установки стиля', { chat_id: chatId, message_id: messageId });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
             sendMainMenu(chatId, '🏠 Главное меню');
         }
+        console.log(`⏱️ Стиль установлен за ${Date.now() - start} мс`);
         return;
     }
 
-    // ----- ПОДТВЕРЖДЕНИЕ ЗАКАЗА -----
+    // ПОДТВЕРЖДЕНИЕ ЗАКАЗА
     if (data.startsWith('confirm_')) {
         const orderId = data.replace('confirm_', '');
         try {
             const response = await axios.post(`${SERVER_URL}/orders/confirm`, { id: orderId });
             if (response.status === 200) {
-                await bot.editMessageText(
-                    `✅ Заказ #${orderId} подтверждён!`,
-                    { chat_id: chatId, message_id: messageId }
-                );
+                await bot.editMessageText(`✅ Заказ #${orderId} подтверждён!`, { chat_id: chatId, message_id: messageId });
                 await bot.answerCallbackQuery(callbackQuery.id, { text: 'Заказ подтверждён!' });
             } else {
                 await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка подтверждения', show_alert: true });
             }
         } catch (error) {
-            console.error(error);
+            console.error('Ошибка подтверждения:', error);
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Сервер недоступен', show_alert: true });
         }
+        console.log(`⏱️ Подтверждение заказа за ${Date.now() - start} мс`);
         return;
     }
 
     await bot.answerCallbackQuery(callbackQuery.id);
 });
 
-console.log('🤖 Бот запущен с постоянной клавиатурой снизу...');
+console.log('🤖 Бот запущен и готов к работе');
