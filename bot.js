@@ -6,30 +6,8 @@ const SERVER_URL = 'https://vkusovshina-server.onrender.com';
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-console.log('🤖 Бот запущен');
-
-// Кэш меню (чтобы не запрашивать каждый раз)
-let cachedMenu = null;
-let cacheTime = 0;
-const CACHE_TTL = 60000; // 1 минута
-
-async function getMenu() {
-    const now = Date.now();
-    if (cachedMenu && (now - cacheTime) < CACHE_TTL) {
-        return cachedMenu;
-    }
-    try {
-        const start = Date.now();
-        const response = await axios.get(`${SERVER_URL}/menu`);
-        console.log(`⏱️ Запрос меню занял ${Date.now() - start} мс`);
-        cachedMenu = response.data;
-        cacheTime = now;
-        return cachedMenu;
-    } catch (e) {
-        console.error('Ошибка получения меню:', e.message);
-        return null;
-    }
-}
+// Хранилище состояний пользователей для поэтапного добавления блюда
+const userStates = {};
 
 function getMainKeyboard() {
     return {
@@ -51,97 +29,143 @@ function sendMainMenu(chatId, text = '🏠 <b>Главное меню</b>\nВы�
     });
 }
 
-// /start и /help – как раньше
+// ===== /start =====
 bot.onText(/\/start/, (msg) => {
-    sendMainMenu(msg.chat.id, '👋 <b>Добро пожаловать в бот управления рестораном!</b>\nВыберите действие:');
+    const chatId = msg.chat.id;
+    sendMainMenu(chatId, '👋 <b>Добро пожаловать в бот управления рестораном!</b>\nВыберите действие:');
 });
 
+// ===== /help =====
 bot.onText(/\/help/, (msg) => {
     sendMainMenu(msg.chat.id, '❓ <b>Справка</b>\nВсе действия доступны через кнопки ниже.');
 });
 
+// ===== Обработка текстовых сообщений =====
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
-    if (!text || text.startsWith('/')) return;
 
-    console.log(`📩 Получено сообщение: "${text}" от ${chatId}`);
+    if (!text) return;
 
-    const startTime = Date.now();
+    // Если команда, пропускаем (они обрабатываются отдельно)
+    if (text.startsWith('/')) return;
 
-    // ----- 1. МЕНЮ -----
-    if (text === '📋 Меню') {
-        try {
-            const menu = await getMenu();
-            if (!menu) {
-                bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
-                return;
-            }
-            if (menu.length === 0) {
-                bot.sendMessage(chatId, '📋 <b>Меню пусто</b>\nДобавьте блюда через "➕ Добавить блюдо".', {
-                    parse_mode: 'HTML',
+    // Проверяем состояние – если пользователь в процессе добавления блюда
+    if (userStates[chatId]) {
+        const state = userStates[chatId];
+        // Добавляем полученные данные в зависимости от шага
+        if (state.step === 'name') {
+            state.name = text;
+            state.step = 'emoji';
+            await bot.sendMessage(chatId, '✏️ Теперь отправьте <b>эмодзи</b> для блюда (например, 🍕):', {
+                parse_mode: 'HTML',
+                reply_markup: getMainKeyboard()
+            });
+            return;
+        } else if (state.step === 'emoji') {
+            state.emoji = text;
+            state.step = 'price';
+            await bot.sendMessage(chatId, '✏️ Теперь отправьте <b>цену</b> (например, 500 коп.):', {
+                parse_mode: 'HTML',
+                reply_markup: getMainKeyboard()
+            });
+            return;
+        } else if (state.step === 'price') {
+            state.price = text;
+            state.step = 'desc';
+            await bot.sendMessage(chatId, '✏️ Теперь отправьте <b>описание</b> (например, "Вкусная пицца с сыром"):', {
+                parse_mode: 'HTML',
+                reply_markup: getMainKeyboard()
+            });
+            return;
+        } else if (state.step === 'desc') {
+            state.desc = text;
+            // Все данные собраны, сохраняем блюдо
+            try {
+                const response = await axios.get(`${SERVER_URL}/menu`);
+                const menu = response.data;
+                // Проверяем уникальность названия
+                if (menu.some(item => item.name.toLowerCase() === state.name.toLowerCase())) {
+                    await bot.sendMessage(chatId, `⚠️ Блюдо "${state.name}" уже существует. Попробуйте снова.`, {
+                        reply_markup: getMainKeyboard()
+                    });
+                    delete userStates[chatId];
+                    return;
+                }
+                menu.push({ name: state.name, emoji: state.emoji, price: state.price, desc: state.desc });
+                await axios.post(`${SERVER_URL}/admin/menu`, { menu });
+                await bot.sendMessage(chatId, `✅ Блюдо "${state.name}" добавлено!`, {
                     reply_markup: getMainKeyboard()
                 });
+                delete userStates[chatId];
+                sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
+            } catch (e) {
+                console.error(e);
+                await bot.sendMessage(chatId, '❌ Ошибка добавления блюда. Попробуйте позже.', {
+                    reply_markup: getMainKeyboard()
+                });
+                delete userStates[chatId];
+            }
+            return;
+        }
+        // Если что-то пошло не так, сбрасываем состояние
+        delete userStates[chatId];
+        sendMainMenu(chatId, '⚠️ Что-то пошло не так. Попробуйте снова.');
+        return;
+    }
+
+    // ----- Остальные кнопки -----
+    if (text === '📋 Меню') {
+        try {
+            const response = await axios.get(`${SERVER_URL}/menu`);
+            const menu = response.data;
+            if (menu.length === 0) {
+                await bot.sendMessage(chatId, '📋 <b>Меню пусто</b>', { parse_mode: 'HTML', reply_markup: getMainKeyboard() });
             } else {
                 let menuText = '📋 <b>Текущее меню:</b>\n\n';
                 menu.forEach((item, i) => {
                     menuText += `${i+1}. ${item.emoji} <b>${item.name}</b> — ${item.price}\n   ${item.desc || ''}\n`;
                 });
-                bot.sendMessage(chatId, menuText, {
-                    parse_mode: 'HTML',
-                    reply_markup: getMainKeyboard()
-                });
+                await bot.sendMessage(chatId, menuText, { parse_mode: 'HTML', reply_markup: getMainKeyboard() });
             }
         } catch (e) {
-            console.error('Ошибка в меню:', e);
-            bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
+            await bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
         }
-        console.log(`⏱️ Команда "Меню" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
-    // ----- 2. ДОБАВИТЬ БЛЮДО -----
     if (text === '➕ Добавить блюдо') {
-        bot.sendMessage(chatId,
-            '✏️ <b>Добавление блюда</b>\n\nОтправьте блюдо в формате:\n\n<code>Название | Эмодзи | Цена | Описание</code>\n\nПример:\n<code>Пицца | 🍕 | 500 коп. | Вкусная пицца</code>\n\nДля отмены просто нажмите любую другую кнопку.',
-            {
-                parse_mode: 'HTML',
-                reply_markup: getMainKeyboard()
-            }
-        );
-        console.log(`⏱️ Команда "Добавить" выполнена за ${Date.now() - startTime} мс`);
+        // Начинаем поэтапное добавление
+        userStates[chatId] = { step: 'name' };
+        await bot.sendMessage(chatId, '✏️ Введите <b>название</b> блюда:', {
+            parse_mode: 'HTML',
+            reply_markup: getMainKeyboard()
+        });
         return;
     }
 
-    // ----- 3. УДАЛИТЬ БЛЮДО -----
     if (text === '🗑️ Удалить блюдо') {
         try {
-            const menu = await getMenu();
-            if (!menu) {
-                bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
-                return;
-            }
+            const response = await axios.get(`${SERVER_URL}/menu`);
+            const menu = response.data;
             if (menu.length === 0) {
-                bot.sendMessage(chatId, '📋 Меню пусто, удалять нечего.', { reply_markup: getMainKeyboard() });
+                await bot.sendMessage(chatId, '📋 Меню пусто, удалять нечего.', { reply_markup: getMainKeyboard() });
             } else {
                 const buttons = menu.map((item, index) => [
                     { text: `${item.emoji} ${item.name}`, callback_data: `remove_${index}` }
                 ]);
                 buttons.push([{ text: '❌ Отмена', callback_data: 'remove_cancel' }]);
-                bot.sendMessage(chatId, '🗑️ <b>Выберите блюдо для удаления:</b>', {
+                await bot.sendMessage(chatId, '🗑️ <b>Выберите блюдо для удаления:</b>', {
                     parse_mode: 'HTML',
                     reply_markup: { inline_keyboard: buttons }
                 });
             }
         } catch (e) {
-            console.error('Ошибка удаления:', e);
-            bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
+            await bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
         }
-        console.log(`⏱️ Команда "Удалить" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
-    // ----- 4. ОТКРЫТЬ/ЗАКРЫТЬ -----
     if (text === '🔄 Открыть/Закрыть') {
         try {
             const statusRes = await axios.get(`${SERVER_URL}/status`);
@@ -149,37 +173,31 @@ bot.on('message', async (msg) => {
             const newStatus = !currentStatus;
             await axios.post(`${SERVER_URL}/admin/status`, { isOpen: newStatus });
             const statusText = newStatus ? '🟢 ОТКРЫТ' : '🔴 ЗАКРЫТ';
-            bot.sendMessage(chatId, `✅ Статус ресторана изменён на <b>${statusText}</b>`, {
+            await bot.sendMessage(chatId, `✅ Статус ресторана изменён на <b>${statusText}</b>`, {
                 parse_mode: 'HTML',
                 reply_markup: getMainKeyboard()
             });
         } catch (e) {
-            console.error('Ошибка статуса:', e);
-            bot.sendMessage(chatId, '❌ Ошибка изменения статуса', { reply_markup: getMainKeyboard() });
+            await bot.sendMessage(chatId, '❌ Ошибка изменения статуса', { reply_markup: getMainKeyboard() });
         }
-        console.log(`⏱️ Команда "Открыть/Закрыть" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
-    // ----- 5. СТАТУС -----
     if (text === '📊 Статус') {
         try {
             const response = await axios.get(`${SERVER_URL}/status`);
             const isOpen = response.data.isOpen;
             const statusText = isOpen ? '🟢 <b>Открыт</b>' : '🔴 <b>Закрыт</b>';
-            bot.sendMessage(chatId, `📊 <b>Текущий статус ресторана:</b>\n${statusText}`, {
+            await bot.sendMessage(chatId, `📊 <b>Текущий статус ресторана:</b>\n${statusText}`, {
                 parse_mode: 'HTML',
                 reply_markup: getMainKeyboard()
             });
         } catch (e) {
-            console.error('Ошибка статуса:', e);
-            bot.sendMessage(chatId, '❌ Ошибка получения статуса', { reply_markup: getMainKeyboard() });
+            await bot.sendMessage(chatId, '❌ Ошибка получения статуса', { reply_markup: getMainKeyboard() });
         }
-        console.log(`⏱️ Команда "Статус" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
-    // ----- 6. СТИЛИ -----
     if (text === '🎨 Стили') {
         const styleButtons = {
             inline_keyboard: [
@@ -192,90 +210,45 @@ bot.on('message', async (msg) => {
                 [{ text: '❌ Отмена', callback_data: 'style_cancel' }]
             ]
         };
-        bot.sendMessage(chatId, '🎨 <b>Выберите стиль для сайта:</b>', {
+        await bot.sendMessage(chatId, '🎨 <b>Выберите стиль для сайта:</b>', {
             parse_mode: 'HTML',
             reply_markup: styleButtons
         });
-        console.log(`⏱️ Команда "Стили" выполнена за ${Date.now() - startTime} мс`);
         return;
     }
 
-    // ----- 7. ПОМОЩЬ -----
     if (text === '❓ Помощь') {
         const helpText = `
 🤖 <b>Управление рестораном через бота</b>
 
 <b>Доступные действия (кнопки снизу):</b>
 • 📋 Меню – посмотреть текущее меню
-• ➕ Добавить блюдо – добавить новое блюдо
+• ➕ Добавить блюдо – добавить новое блюдо (поэтапно)
 • 🗑️ Удалить блюдо – удалить существующее
 • 🔄 Открыть/Закрыть – переключить статус ресторана
 • 📊 Статус – узнать текущий статус
 • 🎨 Стили – изменить дизайн сайта
 
 <b>Добавление блюда:</b>
-Отправьте сообщение в формате:
-<code>Название | Эмодзи | Цена | Описание</code>
-
-<b>Подтверждение заказов:</b>
-При поступлении заказа приходит кнопка "Подтвердить заказ".
+После нажатия кнопки "➕ Добавить блюдо" следуйте инструкциям бота.
         `;
-        bot.sendMessage(chatId, helpText, {
-            parse_mode: 'HTML',
-            reply_markup: getMainKeyboard()
-        });
-        console.log(`⏱️ Команда "Помощь" выполнена за ${Date.now() - startTime} мс`);
-        return;
-    }
-
-    // ----- 8. ОБРАБОТКА ДОБАВЛЕНИЯ БЛЮДА (содержит '|') -----
-    if (text.includes('|')) {
-        const parts = text.split('|').map(s => s.trim());
-        if (parts.length === 4) {
-            const [name, emoji, price, desc] = parts;
-            try {
-                const response = await axios.get(`${SERVER_URL}/menu`);
-                const menu = response.data;
-                if (menu.some(item => item.name.toLowerCase() === name.toLowerCase())) {
-                    bot.sendMessage(chatId, `⚠️ Блюдо "${name}" уже существует. Используйте другое название.`, {
-                        reply_markup: getMainKeyboard()
-                    });
-                    return;
-                }
-                menu.push({ name, emoji, price, desc });
-                await axios.post(`${SERVER_URL}/admin/menu`, { menu });
-                // Очищаем кэш меню
-                cachedMenu = null;
-                bot.sendMessage(chatId, `✅ Блюдо "${name}" добавлено!`, { reply_markup: getMainKeyboard() });
-            } catch (e) {
-                console.error('Ошибка добавления:', e);
-                bot.sendMessage(chatId, '❌ Ошибка добавления блюда. Попробуйте позже.', { reply_markup: getMainKeyboard() });
-            }
-        } else {
-            bot.sendMessage(chatId,
-                '⚠️ Неверный формат. Используйте:\n<code>Название | Эмодзи | Цена | Описание</code>\n\nПример:\n<code>Пицца | 🍕 | 500 коп. | Вкусная пицца</code>',
-                { parse_mode: 'HTML', reply_markup: getMainKeyboard() }
-            );
-        }
-        console.log(`⏱️ Обработка добавления выполнена за ${Date.now() - startTime} мс`);
+        await bot.sendMessage(chatId, helpText, { parse_mode: 'HTML', reply_markup: getMainKeyboard() });
         return;
     }
 
     // Если сообщение не распознано
-    bot.sendMessage(chatId, 'ℹ️ Используйте кнопки снизу для управления.', {
+    await bot.sendMessage(chatId, 'ℹ️ Используйте кнопки снизу для управления.', {
         reply_markup: getMainKeyboard()
     });
-    console.log(`⏱️ Неизвестное сообщение обработано за ${Date.now() - startTime} мс`);
 });
 
-// ===== ОБРАБОТЧИК ИНЛАЙН-КНОПОК =====
+// ===== Обработка инлайн-кнопок =====
 bot.on('callback_query', async (callbackQuery) => {
     const data = callbackQuery.data;
     const chatId = callbackQuery.message.chat.id;
     const messageId = callbackQuery.message.message_id;
-    const start = Date.now();
 
-    // УДАЛЕНИЕ
+    // ----- УДАЛЕНИЕ БЛЮДА -----
     if (data.startsWith('remove_')) {
         const index = parseInt(data.replace('remove_', ''));
         if (isNaN(index) || index < 0) {
@@ -292,8 +265,6 @@ bot.on('callback_query', async (callbackQuery) => {
             }
             const removed = menu.splice(index, 1)[0];
             await axios.post(`${SERVER_URL}/admin/menu`, { menu });
-            // Очищаем кэш
-            cachedMenu = null;
             await bot.editMessageText(`✅ Блюдо "<b>${removed.name}</b>" удалено!`, {
                 chat_id: chatId,
                 message_id: messageId,
@@ -302,12 +273,11 @@ bot.on('callback_query', async (callbackQuery) => {
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Блюдо удалено!' });
             sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
         } catch (e) {
-            console.error('Ошибка удаления:', e);
+            console.error(e);
             await bot.editMessageText('❌ Ошибка удаления блюда', { chat_id: chatId, message_id: messageId });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
             sendMainMenu(chatId, '🏠 Главное меню');
         }
-        console.log(`⏱️ Удаление выполнено за ${Date.now() - start} мс`);
         return;
     }
 
@@ -315,11 +285,10 @@ bot.on('callback_query', async (callbackQuery) => {
         await bot.editMessageText('❌ Удаление отменено', { chat_id: chatId, message_id: messageId });
         await bot.answerCallbackQuery(callbackQuery.id);
         sendMainMenu(chatId, '🏠 Главное меню');
-        console.log(`⏱️ Отмена удаления за ${Date.now() - start} мс`);
         return;
     }
 
-    // СТИЛИ
+    // ----- ВЫБОР СТИЛЯ -----
     if (data.startsWith('style_')) {
         const style = data.replace('style_', '');
         if (style === 'cancel') {
@@ -350,35 +319,36 @@ bot.on('callback_query', async (callbackQuery) => {
             await bot.answerCallbackQuery(callbackQuery.id, { text: `Стиль ${styleNames[style] || style} установлен!` });
             sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
         } catch (e) {
-            console.error('Ошибка установки стиля:', e);
+            console.error(e);
             await bot.editMessageText('❌ Ошибка установки стиля', { chat_id: chatId, message_id: messageId });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
             sendMainMenu(chatId, '🏠 Главное меню');
         }
-        console.log(`⏱️ Стиль установлен за ${Date.now() - start} мс`);
         return;
     }
 
-    // ПОДТВЕРЖДЕНИЕ ЗАКАЗА
+    // ----- ПОДТВЕРЖДЕНИЕ ЗАКАЗА -----
     if (data.startsWith('confirm_')) {
         const orderId = data.replace('confirm_', '');
         try {
             const response = await axios.post(`${SERVER_URL}/orders/confirm`, { id: orderId });
             if (response.status === 200) {
-                await bot.editMessageText(`✅ Заказ #${orderId} подтверждён!`, { chat_id: chatId, message_id: messageId });
+                await bot.editMessageText(
+                    `✅ Заказ #${orderId} подтверждён!`,
+                    { chat_id: chatId, message_id: messageId }
+                );
                 await bot.answerCallbackQuery(callbackQuery.id, { text: 'Заказ подтверждён!' });
             } else {
                 await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка подтверждения', show_alert: true });
             }
         } catch (error) {
-            console.error('Ошибка подтверждения:', error);
+            console.error(error);
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Сервер недоступен', show_alert: true });
         }
-        console.log(`⏱️ Подтверждение заказа за ${Date.now() - start} мс`);
         return;
     }
 
     await bot.answerCallbackQuery(callbackQuery.id);
 });
 
-console.log('🤖 Бот запущен и готов к работе');
+console.log('🤖 Бот запущен с поэтапным добавлением блюд и постоянной клавиатурой...');
