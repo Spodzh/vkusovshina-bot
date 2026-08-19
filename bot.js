@@ -12,7 +12,7 @@ function getMainKeyboard() {
         keyboard: [
             ['📋 Меню', '➕ Добавить блюдо'],
             ['🗑️ Удалить блюдо', '🔄 Открыть/Закрыть'],
-            ['📊 Статус', '🎨 Стили'],  // НОВАЯ КНОПКА
+            ['📊 Статус', '🎨 Стили'],
             ['❓ Помощь']
         ],
         resize_keyboard: true,
@@ -33,6 +33,7 @@ bot.onText(/\/start/, (msg) => {
     sendMainMenu(chatId, '👋 <b>Добро пожаловать в бот управления рестораном!</b>\nВыберите действие:');
 });
 
+// ===== /help =====
 bot.onText(/\/help/, (msg) => {
     sendMainMenu(msg.chat.id, '❓ <b>Справка</b>\nВсе действия доступны через кнопки ниже.');
 });
@@ -139,15 +140,25 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // ----- 6. СТИЛИ (НОВАЯ КНОПКА) -----
-   const styleNames = {
-    light: '🌿 Лёгкий и воздушный',
-    modern: '🔥 Яркий и дерзкий',
-    french: '🇫🇷 Классический французский',
-    japanese: '🇯🇵 Минималистичный японский',
-    eco: '🌱 Эко-стиль',
-    classic: '⚫ Классический (премиум)'
-};
+    // ----- 6. СТИЛИ (с кнопкой "Классический") -----
+    if (text === '🎨 Стили') {
+        const styleButtons = {
+            inline_keyboard: [
+                [{ text: '🌿 Лёгкий и воздушный', callback_data: 'style_light' }],
+                [{ text: '🔥 Яркий и дерзкий', callback_data: 'style_modern' }],
+                [{ text: '🇫🇷 Классический французский', callback_data: 'style_french' }],
+                [{ text: '🇯🇵 Минималистичный японский', callback_data: 'style_japanese' }],
+                [{ text: '🌱 Эко-стиль', callback_data: 'style_eco' }],
+                [{ text: '⚫ Классический (премиум)', callback_data: 'style_classic' }],
+                [{ text: '❌ Отмена', callback_data: 'style_cancel' }]
+            ]
+        };
+        bot.sendMessage(chatId, '🎨 <b>Выберите стиль для сайта:</b>', {
+            parse_mode: 'HTML',
+            reply_markup: styleButtons
+        });
+        return;
+    }
 
     // ----- 7. ПОМОЩЬ -----
     if (text === '❓ Помощь') {
@@ -168,9 +179,6 @@ bot.on('message', async (msg) => {
 
 <b>Подтверждение заказов:</b>
 При поступлении заказа приходит кнопка "Подтвердить заказ".
-
-<b>Сайт ресторана:</b>
-https://vkusovshina.onrender.com (или твой URL)
         `;
         bot.sendMessage(chatId, helpText, {
             parse_mode: 'HTML',
@@ -244,10 +252,8 @@ bot.on('callback_query', async (callbackQuery) => {
                 parse_mode: 'HTML'
             });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Блюдо удалено!' });
-            bot.sendMessage(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:', {
-                parse_mode: 'HTML',
-                reply_markup: getMainKeyboard()
-            });
+            // ВОЗВРАЩАЕМ ГЛАВНОЕ МЕНЮ
+            sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
         } catch (e) {
             console.error(e);
             await bot.editMessageText('❌ Ошибка удаления блюда', {
@@ -255,7 +261,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 message_id: messageId
             });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
-            bot.sendMessage(chatId, '🏠 Главное меню', { reply_markup: getMainKeyboard() });
+            sendMainMenu(chatId, '🏠 Главное меню');
         }
         return;
     }
@@ -263,11 +269,11 @@ bot.on('callback_query', async (callbackQuery) => {
     if (data === 'remove_cancel') {
         await bot.editMessageText('❌ Удаление отменено', { chat_id: chatId, message_id: messageId });
         await bot.answerCallbackQuery(callbackQuery.id);
-        bot.sendMessage(chatId, '🏠 Главное меню', { reply_markup: getMainKeyboard() });
+        sendMainMenu(chatId, '🏠 Главное меню');
         return;
     }
 
-    // ----- ВЫБОР СТИЛЯ (НОВЫЙ ОБРАБОТЧИК) -----
+    // ----- ВЫБОР СТИЛЯ -----
     if (data.startsWith('style_')) {
         const style = data.replace('style_', '');
         if (style === 'cancel') {
@@ -276,7 +282,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 message_id: messageId
             });
             await bot.answerCallbackQuery(callbackQuery.id);
-            bot.sendMessage(chatId, '🏠 Главное меню', { reply_markup: getMainKeyboard() });
+            sendMainMenu(chatId, '🏠 Главное меню');
             return;
         }
 
@@ -287,18 +293,20 @@ bot.on('callback_query', async (callbackQuery) => {
                 modern: '🔥 Яркий и дерзкий',
                 french: '🇫🇷 Классический французский',
                 japanese: '🇯🇵 Минималистичный японский',
-                eco: '🌱 Эко-стиль'
+                eco: '🌱 Эко-стиль',
+                classic: '⚫ Классический (премиум)'
             };
             await bot.editMessageText(
-                `✅ Стиль изменён на <b>${styleNames[style]}</b>\nОбновите сайт, чтобы увидеть изменения.`,
+                `✅ Стиль изменён на <b>${styleNames[style] || style}</b>\nОбновите сайт, чтобы увидеть изменения.`,
                 {
                     chat_id: chatId,
                     message_id: messageId,
                     parse_mode: 'HTML'
                 }
             );
-            await bot.answerCallbackQuery(callbackQuery.id, { text: `Стиль ${styleNames[style]} установлен!` });
-            bot.sendMessage(chatId, '🏠 Главное меню', { reply_markup: getMainKeyboard() });
+            await bot.answerCallbackQuery(callbackQuery.id, { text: `Стиль ${styleNames[style] || style} установлен!` });
+            // ВОЗВРАЩАЕМ ГЛАВНОЕ МЕНЮ
+            sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
         } catch (e) {
             console.error(e);
             await bot.editMessageText('❌ Ошибка установки стиля', {
@@ -306,6 +314,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 message_id: messageId
             });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
+            sendMainMenu(chatId, '🏠 Главное меню');
         }
         return;
     }
@@ -334,4 +343,4 @@ bot.on('callback_query', async (callbackQuery) => {
     await bot.answerCallbackQuery(callbackQuery.id);
 });
 
-console.log('🤖 Бот запущен с постоянной клавиатурой и кнопкой стилей...');
+console.log('🤖 Бот запущен с постоянной клавиатурой снизу...');
