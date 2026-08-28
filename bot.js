@@ -4,19 +4,17 @@ const axios = require('axios');
 const TOKEN = '8752139780:AAEIbtDqq2F3FJ2TqFWcINLWg6Zml8UyAQI';
 const SERVER_URL = 'https://vkusovshina-server.onrender.com';
 
-// Настройки бота для избежания конфликтов
-const bot = new TelegramBot(TOKEN, {
-    polling: {
-        autoStart: true,
-        interval: 300, // пауза между запросами (мс)
-        params: {
-            timeout: 10 // таймаут long polling (сек)
-        }
-    }
-});
+const bot = new TelegramBot(TOKEN, { polling: true });
 
-// ===== КЛАВИАТУРА =====
-function getMainKeyboard() {
+// ===== ВЛАДЕЛЕЦ (замени на свой user_id) =====
+// Чтобы узнать свой ID, напишите боту /myid
+const OWNER_ID = 7892506421; // <-- ВСТАВЬ СВОЙ ID (из /myid)
+
+// ===== СОСТОЯНИЕ ДЛЯ ПОЭТАПНОГО ДОБАВЛЕНИЯ =====
+const userStates = {};
+
+// ===== КЛАВИАТУРЫ =====
+function getAdminKeyboard() {
     return {
         keyboard: [
             ['📋 Меню', '➕ Добавить блюдо'],
@@ -29,158 +27,203 @@ function getMainKeyboard() {
     };
 }
 
+function getUserKeyboard() {
+    return {
+        keyboard: [
+            ['📋 Меню', '📊 Статус'],
+            ['🎨 Стили', '❓ Помощь']
+        ],
+        resize_keyboard: true,
+        one_time_keyboard: false
+    };
+}
+
+function getKeyboardForUser(userId) {
+    return isAdmin(userId) ? getAdminKeyboard() : getUserKeyboard();
+}
+
+// ===== АДМИНКА =====
+let admins = [];
+
+async function loadAdmins() {
+    try {
+        const response = await axios.get(`${SERVER_URL}/admins`);
+        admins = response.data.admins || [];
+        console.log('✅ Список админов загружен:', admins);
+    } catch (e) {
+        console.error('❌ Ошибка загрузки админов:', e);
+        admins = [];
+    }
+}
+
+function isAdmin(userId) {
+    return userId === OWNER_ID || admins.includes(userId);
+}
+
+// ===== ОТПРАВКА ГЛАВНОГО МЕНЮ =====
 function sendMainMenu(chatId, text = '🏠 <b>Главное меню</b>\nВыберите действие:') {
+    const userId = chatId; // в Telegram chatId == userId для личных сообщений
     bot.sendMessage(chatId, text, {
         parse_mode: 'HTML',
-        reply_markup: getMainKeyboard()
+        reply_markup: getKeyboardForUser(userId)
     });
 }
 
-// ===== ОТСЛЕЖИВАНИЕ СОСТОЯНИЙ ПОЛЬЗОВАТЕЛЕЙ (для поэтапного добавления) =====
-const userStates = {};
-
-// ===== /start =====
-bot.onText(/\/start/, (msg) => {
+// ===== КОМАНДЫ ДЛЯ ВЛАДЕЛЬЦА =====
+bot.onText(/\/addadmin (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    sendMainMenu(chatId, '👋 <b>Добро пожаловать в бот управления рестораном!</b>\nВыберите действие:');
+    if (chatId !== OWNER_ID) {
+        bot.sendMessage(chatId, '⛔ У вас нет прав на эту команду.');
+        return;
+    }
+    const userId = parseInt(match[1].trim());
+    if (isNaN(userId)) {
+        bot.sendMessage(chatId, '❌ Неверный ID. Используйте: /addadmin 123456789');
+        return;
+    }
+    try {
+        await axios.post(`${SERVER_URL}/admin/admins`, { userId });
+        await loadAdmins();
+        bot.sendMessage(chatId, `✅ Пользователь ${userId} теперь админ.`);
+    } catch (e) {
+        bot.sendMessage(chatId, `❌ Ошибка: ${e.response?.data?.error || e.message}`);
+    }
 });
 
-// ===== /help =====
-bot.onText(/\/help/, (msg) => {
-    sendMainMenu(msg.chat.id, '❓ <b>Справка</b>\nВсе действия доступны через кнопки ниже.');
+bot.onText(/\/removeadmin (.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    if (chatId !== OWNER_ID) {
+        bot.sendMessage(chatId, '⛔ У вас нет прав на эту команду.');
+        return;
+    }
+    const userId = parseInt(match[1].trim());
+    if (isNaN(userId)) {
+        bot.sendMessage(chatId, '❌ Неверный ID. Используйте: /removeadmin 123456789');
+        return;
+    }
+    if (userId === OWNER_ID) {
+        bot.sendMessage(chatId, '❌ Нельзя удалить владельца.');
+        return;
+    }
+    try {
+        await axios.delete(`${SERVER_URL}/admin/admins`, { data: { userId } });
+        await loadAdmins();
+        bot.sendMessage(chatId, `✅ Пользователь ${userId} больше не админ.`);
+    } catch (e) {
+        bot.sendMessage(chatId, `❌ Ошибка: ${e.response?.data?.error || e.message}`);
+    }
+});
+
+bot.onText(/\/myid/, (msg) => {
+    const chatId = msg.chat.id;
+    bot.sendMessage(chatId, `Ваш ID: <code>${chatId}</code>`, { parse_mode: 'HTML' });
 });
 
 // ===== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ =====
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
+    const userId = chatId;
 
     if (!text || text.startsWith('/')) return;
 
-    // ----- ПОЭТАПНОЕ ДОБАВЛЕНИЕ: обработка состояний -----
+    // ===== ПОЭТАПНОЕ ДОБАВЛЕНИЕ БЛЮДА =====
     if (userStates[chatId] && userStates[chatId].step) {
         const state = userStates[chatId];
-        try {
-            // Получаем текущее меню с сервера
-            const response = await axios.get(`${SERVER_URL}/menu`);
-            const menu = response.data;
+        let step = state.step;
+        let dish = state.dish || {};
 
-            if (state.step === 'name') {
-                // Сохраняем название
-                state.name = text.trim();
-                state.step = 'emoji';
-                bot.sendMessage(chatId, '✏️ Введите <b>эмодзи</b> для блюда (например, 🍕):', {
-                    parse_mode: 'HTML',
-                    reply_markup: getMainKeyboard()
-                });
-                return;
-            }
+        if (step === 'name') {
+            dish.name = text;
+            state.step = 'emoji';
+            state.dish = dish;
+            bot.sendMessage(chatId, '✏️ Теперь введите <b>эмодзи</b> блюда (например: 🍕):', { parse_mode: 'HTML', reply_markup: getKeyboardForUser(userId) });
+            return;
+        } else if (step === 'emoji') {
+            dish.emoji = text;
+            state.step = 'price';
+            state.dish = dish;
+            bot.sendMessage(chatId, '✏️ Введите <b>цену</b> блюда (например: 500 коп.):', { parse_mode: 'HTML', reply_markup: getKeyboardForUser(userId) });
+            return;
+        } else if (step === 'price') {
+            dish.price = text;
+            state.step = 'desc';
+            state.dish = dish;
+            bot.sendMessage(chatId, '✏️ Введите <b>описание</b> блюда:', { parse_mode: 'HTML', reply_markup: getKeyboardForUser(userId) });
+            return;
+        } else if (step === 'desc') {
+            dish.desc = text;
+            state.step = 'confirm';
+            state.dish = dish;
+            // Показываем итог и просим подтверждение
+            const confirmText = `
+📋 <b>Новое блюдо:</b>
+Название: ${dish.name}
+Эмодзи: ${dish.emoji}
+Цена: ${dish.price}
+Описание: ${dish.desc}
 
-            if (state.step === 'emoji') {
-                state.emoji = text.trim();
-                state.step = 'price';
-                bot.sendMessage(chatId, '✏️ Введите <b>цену</b> (например, 500 коп.):', {
-                    parse_mode: 'HTML',
-                    reply_markup: getMainKeyboard()
-                });
-                return;
-            }
-
-            if (state.step === 'price') {
-                state.price = text.trim();
-                state.step = 'desc';
-                bot.sendMessage(chatId, '✏️ Введите <b>описание</b> блюда (необязательно, можно пропустить, отправив "-"):', {
-                    parse_mode: 'HTML',
-                    reply_markup: getMainKeyboard()
-                });
-                return;
-            }
-
-            if (state.step === 'desc') {
-                const desc = text.trim() === '-' ? '' : text.trim();
-                // Добавляем блюдо
-                const newDish = {
-                    name: state.name,
-                    emoji: state.emoji,
-                    price: state.price,
-                    desc: desc
-                };
-                // Проверяем, нет ли уже такого блюда
-                if (menu.some(item => item.name.toLowerCase() === state.name.toLowerCase())) {
-                    bot.sendMessage(chatId, `⚠️ Блюдо "${state.name}" уже существует.`, {
-                        reply_markup: getMainKeyboard()
-                    });
-                    delete userStates[chatId];
-                    sendMainMenu(chatId, '🏠 Главное меню');
-                    return;
+Подтвердить добавление?
+            `;
+            bot.sendMessage(chatId, confirmText, {
+                parse_mode: 'HTML',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '✅ Да, добавить', callback_data: 'confirm_add' }],
+                        [{ text: '❌ Отмена', callback_data: 'cancel_add' }]
+                    ]
                 }
-                menu.push(newDish);
-                await axios.post(`${SERVER_URL}/admin/menu`, { menu });
-                bot.sendMessage(chatId, `✅ Блюдо "${state.name}" добавлено!`, {
-                    reply_markup: getMainKeyboard()
-                });
-                delete userStates[chatId];
-                sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
-                return;
-            }
-        } catch (e) {
-            console.error(e);
-            bot.sendMessage(chatId, '❌ Ошибка добавления блюда. Попробуйте позже.', {
-                reply_markup: getMainKeyboard()
             });
-            delete userStates[chatId];
-            sendMainMenu(chatId, '🏠 Главное меню');
+            return;
         }
         return;
     }
 
-    // ----- ОБЫЧНЫЕ КОМАНДЫ (кнопки) -----
+    // ===== ОБЫЧНЫЕ КОМАНДЫ (кнопки) =====
 
-    // 1. МЕНЮ
+    // ----- 1. МЕНЮ -----
     if (text === '📋 Меню') {
         try {
             const response = await axios.get(`${SERVER_URL}/menu`);
             const menu = response.data;
             if (menu.length === 0) {
-                bot.sendMessage(chatId, '📋 <b>Меню пусто</b>\nДобавьте блюда через "➕ Добавить блюдо".', {
-                    parse_mode: 'HTML',
-                    reply_markup: getMainKeyboard()
-                });
+                bot.sendMessage(chatId, '📋 Меню пусто', { reply_markup: getKeyboardForUser(userId) });
             } else {
                 let menuText = '📋 <b>Текущее меню:</b>\n\n';
                 menu.forEach((item, i) => {
                     menuText += `${i+1}. ${item.emoji} <b>${item.name}</b> — ${item.price}\n   ${item.desc || ''}\n`;
                 });
-                bot.sendMessage(chatId, menuText, {
-                    parse_mode: 'HTML',
-                    reply_markup: getMainKeyboard()
-                });
+                bot.sendMessage(chatId, menuText, { parse_mode: 'HTML', reply_markup: getKeyboardForUser(userId) });
             }
         } catch (e) {
-            bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
+            bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getKeyboardForUser(userId) });
         }
         return;
     }
 
-    // 2. ДОБАВИТЬ БЛЮДО (запуск поэтапного процесса)
+    // ----- 2. ДОБАВИТЬ БЛЮДО (только для админов) -----
     if (text === '➕ Добавить блюдо') {
-        // Сбрасываем состояние, если оно было
-        delete userStates[chatId];
-        userStates[chatId] = { step: 'name' };
-        bot.sendMessage(chatId, '✏️ Введите <b>название</b> блюда:', {
-            parse_mode: 'HTML',
-            reply_markup: getMainKeyboard()
-        });
+        if (!isAdmin(userId)) {
+            bot.sendMessage(chatId, '⛔ У вас нет прав на это действие.', { reply_markup: getKeyboardForUser(userId) });
+            return;
+        }
+        // Запускаем поэтапное добавление
+        userStates[chatId] = { step: 'name', dish: {} };
+        bot.sendMessage(chatId, '✏️ Введите <b>название</b> блюда:', { parse_mode: 'HTML', reply_markup: getKeyboardForUser(userId) });
         return;
     }
 
-    // 3. УДАЛИТЬ БЛЮДО
+    // ----- 3. УДАЛИТЬ БЛЮДО (только для админов) -----
     if (text === '🗑️ Удалить блюдо') {
+        if (!isAdmin(userId)) {
+            bot.sendMessage(chatId, '⛔ У вас нет прав на это действие.', { reply_markup: getKeyboardForUser(userId) });
+            return;
+        }
         try {
             const response = await axios.get(`${SERVER_URL}/menu`);
             const menu = response.data;
             if (menu.length === 0) {
-                bot.sendMessage(chatId, '📋 Меню пусто, удалять нечего.', { reply_markup: getMainKeyboard() });
+                bot.sendMessage(chatId, '📋 Меню пусто, удалять нечего.', { reply_markup: getKeyboardForUser(userId) });
             } else {
                 const buttons = menu.map((item, index) => [
                     { text: `${item.emoji} ${item.name}`, callback_data: `remove_${index}` }
@@ -192,13 +235,17 @@ bot.on('message', async (msg) => {
                 });
             }
         } catch (e) {
-            bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getMainKeyboard() });
+            bot.sendMessage(chatId, '❌ Ошибка загрузки меню', { reply_markup: getKeyboardForUser(userId) });
         }
         return;
     }
 
-    // 4. ПЕРЕКЛЮЧИТЬ СТАТУС
+    // ----- 4. ПЕРЕКЛЮЧИТЬ СТАТУС (только для админов) -----
     if (text === '🔄 Открыть/Закрыть') {
+        if (!isAdmin(userId)) {
+            bot.sendMessage(chatId, '⛔ У вас нет прав на это действие.', { reply_markup: getKeyboardForUser(userId) });
+            return;
+        }
         try {
             const statusRes = await axios.get(`${SERVER_URL}/status`);
             const currentStatus = statusRes.data.isOpen;
@@ -207,15 +254,15 @@ bot.on('message', async (msg) => {
             const statusText = newStatus ? '🟢 ОТКРЫТ' : '🔴 ЗАКРЫТ';
             bot.sendMessage(chatId, `✅ Статус ресторана изменён на <b>${statusText}</b>`, {
                 parse_mode: 'HTML',
-                reply_markup: getMainKeyboard()
+                reply_markup: getKeyboardForUser(userId)
             });
         } catch (e) {
-            bot.sendMessage(chatId, '❌ Ошибка изменения статуса', { reply_markup: getMainKeyboard() });
+            bot.sendMessage(chatId, '❌ Ошибка изменения статуса', { reply_markup: getKeyboardForUser(userId) });
         }
         return;
     }
 
-    // 5. СТАТУС
+    // ----- 5. СТАТУС -----
     if (text === '📊 Статус') {
         try {
             const response = await axios.get(`${SERVER_URL}/status`);
@@ -223,16 +270,20 @@ bot.on('message', async (msg) => {
             const statusText = isOpen ? '🟢 <b>Открыт</b>' : '🔴 <b>Закрыт</b>';
             bot.sendMessage(chatId, `📊 <b>Текущий статус ресторана:</b>\n${statusText}`, {
                 parse_mode: 'HTML',
-                reply_markup: getMainKeyboard()
+                reply_markup: getKeyboardForUser(userId)
             });
         } catch (e) {
-            bot.sendMessage(chatId, '❌ Ошибка получения статуса', { reply_markup: getMainKeyboard() });
+            bot.sendMessage(chatId, '❌ Ошибка получения статуса', { reply_markup: getKeyboardForUser(userId) });
         }
         return;
     }
 
-    // 6. СТИЛИ
+    // ----- 6. СТИЛИ (только для админов) -----
     if (text === '🎨 Стили') {
+        if (!isAdmin(userId)) {
+            bot.sendMessage(chatId, '⛔ У вас нет прав на это действие.', { reply_markup: getKeyboardForUser(userId) });
+            return;
+        }
         const styleButtons = {
             inline_keyboard: [
                 [{ text: '🌿 Лёгкий и воздушный', callback_data: 'style_light' }],
@@ -251,33 +302,36 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    // 7. ПОМОЩЬ
+    // ----- 7. ПОМОЩЬ -----
     if (text === '❓ Помощь') {
         const helpText = `
-🤖 <b>Управление рестораном через бота</b>
+🤖 <b>Управление рестораном</b>
 
-<b>Доступные действия (кнопки снизу):</b>
-• 📋 Меню – посмотреть текущее меню
-• ➕ Добавить блюдо – добавить новое блюдо (пошагово)
+<b>Для всех пользователей:</b>
+• 📋 Меню – посмотреть меню
+• 📊 Статус – узнать, открыт ли ресторан
+• 🎨 Стили – изменить дизайн сайта (если есть права)
+• ❓ Помощь – эта справка
+
+<b>Для админов (дополнительно):</b>
+• ➕ Добавить блюдо – добавить новое блюдо
 • 🗑️ Удалить блюдо – удалить существующее
 • 🔄 Открыть/Закрыть – переключить статус ресторана
-• 📊 Статус – узнать текущий статус
-• 🎨 Стили – изменить дизайн сайта
 
-<b>Добавление блюда:</b>
-Нажмите "➕ Добавить блюдо" и следуйте инструкциям бота.
+<b>Владелец:</b>
+• /addadmin <id> – дать права админа
+• /removeadmin <id> – забрать права админа
+• /myid – показать свой ID
         `;
         bot.sendMessage(chatId, helpText, {
             parse_mode: 'HTML',
-            reply_markup: getMainKeyboard()
+            reply_markup: getKeyboardForUser(userId)
         });
         return;
     }
 
-    // Если сообщение не распознано
-    bot.sendMessage(chatId, 'ℹ️ Используйте кнопки снизу для управления.', {
-        reply_markup: getMainKeyboard()
-    });
+    // Если ничего не подошло
+    bot.sendMessage(chatId, 'ℹ️ Используйте кнопки снизу или команды.', { reply_markup: getKeyboardForUser(userId) });
 });
 
 // ===== ОБРАБОТЧИК ИНЛАЙН-КНОПОК =====
@@ -285,6 +339,61 @@ bot.on('callback_query', async (callbackQuery) => {
     const data = callbackQuery.data;
     const chatId = callbackQuery.message.chat.id;
     const messageId = callbackQuery.message.message_id;
+    const userId = chatId;
+
+    // ----- ПОДТВЕРЖДЕНИЕ ДОБАВЛЕНИЯ БЛЮДА -----
+    if (data === 'confirm_add') {
+        const state = userStates[chatId];
+        if (!state || !state.dish) {
+            await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка: нет данных' });
+            return;
+        }
+        const dish = state.dish;
+        try {
+            const response = await axios.get(`${SERVER_URL}/menu`);
+            const menu = response.data;
+            if (menu.some(item => item.name.toLowerCase() === dish.name.toLowerCase())) {
+                await bot.editMessageText(`⚠️ Блюдо "${dish.name}" уже существует.`, {
+                    chat_id: chatId,
+                    message_id: messageId
+                });
+                await bot.answerCallbackQuery(callbackQuery.id, { text: 'Блюдо уже есть' });
+                delete userStates[chatId];
+                sendMainMenu(chatId);
+                return;
+            }
+            menu.push(dish);
+            await axios.post(`${SERVER_URL}/admin/menu`, { menu });
+            await bot.editMessageText(`✅ Блюдо "${dish.name}" добавлено!`, {
+                chat_id: chatId,
+                message_id: messageId
+            });
+            await bot.answerCallbackQuery(callbackQuery.id, { text: 'Блюдо добавлено!' });
+            delete userStates[chatId];
+            sendMainMenu(chatId, '🏠 Главное меню');
+        } catch (e) {
+            console.error(e);
+            await bot.editMessageText('❌ Ошибка добавления блюда', {
+                chat_id: chatId,
+                message_id: messageId
+            });
+            await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
+            delete userStates[chatId];
+            sendMainMenu(chatId);
+        }
+        return;
+    }
+
+    if (data === 'cancel_add') {
+        await bot.editMessageText('❌ Добавление отменено', {
+            chat_id: chatId,
+            message_id: messageId
+        });
+        await bot.answerCallbackQuery(callbackQuery.id);
+        delete userStates[chatId];
+        sendMainMenu(chatId);
+        return;
+    }
 
     // ----- УДАЛЕНИЕ БЛЮДА -----
     if (data.startsWith('remove_')) {
@@ -309,7 +418,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 parse_mode: 'HTML'
             });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Блюдо удалено!' });
-            sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
+            sendMainMenu(chatId);
         } catch (e) {
             console.error(e);
             await bot.editMessageText('❌ Ошибка удаления блюда', {
@@ -317,7 +426,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 message_id: messageId
             });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
-            sendMainMenu(chatId, '🏠 Главное меню');
+            sendMainMenu(chatId);
         }
         return;
     }
@@ -325,11 +434,11 @@ bot.on('callback_query', async (callbackQuery) => {
     if (data === 'remove_cancel') {
         await bot.editMessageText('❌ Удаление отменено', { chat_id: chatId, message_id: messageId });
         await bot.answerCallbackQuery(callbackQuery.id);
-        sendMainMenu(chatId, '🏠 Главное меню');
+        sendMainMenu(chatId);
         return;
     }
 
-    // ----- ВЫБОР СТИЛЯ -----
+    // ----- ВЫБОР СТИЛЯ (только для админов) -----
     if (data.startsWith('style_')) {
         const style = data.replace('style_', '');
         if (style === 'cancel') {
@@ -338,7 +447,18 @@ bot.on('callback_query', async (callbackQuery) => {
                 message_id: messageId
             });
             await bot.answerCallbackQuery(callbackQuery.id);
-            sendMainMenu(chatId, '🏠 Главное меню');
+            sendMainMenu(chatId);
+            return;
+        }
+
+        // Проверка на админа
+        if (!isAdmin(userId)) {
+            await bot.editMessageText('⛔ У вас нет прав на это действие.', {
+                chat_id: chatId,
+                message_id: messageId
+            });
+            await bot.answerCallbackQuery(callbackQuery.id, { text: 'Нет прав' });
+            sendMainMenu(chatId);
             return;
         }
 
@@ -353,7 +473,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 classic: '⚫ Классический (премиум)'
             };
             await bot.editMessageText(
-                `✅ Стиль изменён на <b>${styleNames[style] || style}</b>\nОбновите сайт, чтобы увидеть изменения.`,
+                `✅ Стиль изменён на <b>${styleNames[style] || style}</b>\nОбновите сайт.`,
                 {
                     chat_id: chatId,
                     message_id: messageId,
@@ -361,7 +481,7 @@ bot.on('callback_query', async (callbackQuery) => {
                 }
             );
             await bot.answerCallbackQuery(callbackQuery.id, { text: `Стиль ${styleNames[style] || style} установлен!` });
-            sendMainMenu(chatId, '🏠 <b>Главное меню</b>\nВыберите действие:');
+            sendMainMenu(chatId);
         } catch (e) {
             console.error(e);
             await bot.editMessageText('❌ Ошибка установки стиля', {
@@ -369,12 +489,12 @@ bot.on('callback_query', async (callbackQuery) => {
                 message_id: messageId
             });
             await bot.answerCallbackQuery(callbackQuery.id, { text: 'Ошибка', show_alert: true });
-            sendMainMenu(chatId, '🏠 Главное меню');
+            sendMainMenu(chatId);
         }
         return;
     }
 
-    // ----- ПОДТВЕРЖДЕНИЕ ЗАКАЗА -----
+    // ----- ПОДТВЕРЖДЕНИЕ ЗАКАЗА (без изменений) -----
     if (data.startsWith('confirm_')) {
         const orderId = data.replace('confirm_', '');
         try {
@@ -398,4 +518,10 @@ bot.on('callback_query', async (callbackQuery) => {
     await bot.answerCallbackQuery(callbackQuery.id);
 });
 
-console.log('🤖 Бот запущен с поэтапным добавлением блюд и постоянной клавиатурой...');
+// ===== ЗАГРУЗКА АДМИНОВ ПРИ СТАРТЕ =====
+loadAdmins().then(() => {
+    console.log('🤖 Бот запущен с админкой и поэтапным добавлением блюд...');
+});
+
+// ===== ПЕРИОДИЧЕСКОЕ ОБНОВЛЕНИЕ АДМИНОВ =====
+setInterval(loadAdmins, 5 * 60 * 1000); // каждые 5 минут
